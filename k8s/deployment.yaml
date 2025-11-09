@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: joke-server
-        image: navyn13/joke-server:1.0
+        image: navyn13/myapp:latest
         imagePullPolicy: Always
         ports:
           - containerPort: 8080
@@ -41,6 +41,7 @@ kind: Service
 metadata:
   name: joke-server
 spec:
+  type: NodePort
   selector:
     app: joke-server
   ports:
