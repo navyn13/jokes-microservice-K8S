@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jokes-service
+  namespace: default
+  labels:
+    app: jokes-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: jokes-service
+  template:
+    metadata:
+      labels:
+        app: jokes-service
+    spec:
+      containers:
+      - name: jokes
+        image: navyn13/jokes-service:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8081
+          name: http
+        env:
+        - name: PORT
+          value: "8081"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "signoz-otel-collector.platform.svc.cluster.local:4317"
+        - name: ANALYTICS_SERVICE_URL
+          value: "analytics-service.default.svc.cluster.local"
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jokes-service
+  namespace: default
+  labels:
+    app: jokes-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8081
+    name: http
+  selector:
+    app: jokes-service
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: jokes-service-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: jokes-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+

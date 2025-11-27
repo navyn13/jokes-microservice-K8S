@@ -1,0 +1,145 @@
+services:
+  # SigNoz ClickHouse for storage
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.7-alpine
+    container_name: signoz-clickhouse
+    hostname: clickhouse
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    environment:
+      - CLICKHOUSE_DB=signoz
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=signoz
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    networks:
+      - microservices
+
+  # SigNoz Query Service
+  query-service:
+    image: signoz/query-service:0.36.1
+    container_name: signoz-query-service
+    depends_on:
+      - clickhouse
+    ports:
+      - "8080:8080"
+    environment:
+      - STORAGE=clickhouse
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_DATABASE=signoz
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=signoz
+    networks:
+      - microservices
+
+  # SigNoz OpenTelemetry Collector
+  otel-collector:
+    image: signoz/signoz-otel-collector:0.88.11
+    container_name: signoz-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    depends_on:
+      - clickhouse
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8888:8888"   # Prometheus metrics exposed by the collector
+      - "8889:8889"   # Prometheus exporter metrics
+    environment:
+      - GOGC=80
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    networks:
+      - microservices
+
+  # SigNoz Frontend
+  frontend:
+    image: signoz/frontend:0.36.1
+    container_name: signoz-frontend
+    depends_on:
+      - query-service
+    ports:
+      - "3301:3301"
+    environment:
+      - NEXT_PUBLIC_QUERY_SERVICE_URL=http://query-service:8080
+    networks:
+      - microservices
+
+  # API Gateway Service
+  api-gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    depends_on:
+      - otel-collector
+      - jokes-service
+      - user-service
+      - analytics-service
+    ports:
+      - "8000:8080"
+    environment:
+      - PORT=8080
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+      - JOKES_SERVICE_URL=jokes-service:8081
+      - USER_SERVICE_URL=user-service:8083
+      - ANALYTICS_SERVICE_URL=analytics-service:8082
+    networks:
+      - microservices
+
+  # Jokes Service
+  jokes-service:
+    build:
+      context: ./services/jokes
+      dockerfile: Dockerfile
+    depends_on:
+      - otel-collector
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+      - ANALYTICS_SERVICE_URL=analytics-service:8082
+    networks:
+      - microservices
+
+  # Analytics Service
+  analytics-service:
+    build:
+      context: ./services/analytics
+      dockerfile: Dockerfile
+    container_name: analytics-service
+    depends_on:
+      - otel-collector
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    networks:
+      - microservices
+
+  # User Service
+  user-service:
+    build:
+      context: ./services/user
+      dockerfile: Dockerfile
+    container_name: user-service
+    depends_on:
+      - otel-collector
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    networks:
+      - microservices
+
+volumes:
+  clickhouse-data:
+
+networks:
+  microservices:
+    driver: bridge
+

@@ -1,0 +1,69 @@
+# OpenTelemetry Collector Configuration for local development
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  
+  # For collector's own metrics
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['0.0.0.0:8888']
+
+processors:
+  batch:
+    send_batch_size: 1000
+    timeout: 10s
+  
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 512
+  
+  # Add resource attributes
+  resource:
+    attributes:
+      - key: environment
+        value: docker-compose
+        action: upsert
+      - key: cluster.name
+        value: local-dev
+        action: upsert
+
+exporters:
+  # Console exporter for debugging
+  logging:
+    loglevel: debug
+  
+  # Export to ClickHouse via gRPC
+  otlp:
+    endpoint: clickhouse:9009
+    tls:
+      insecure: true
+  
+  # Prometheus exporter for metrics
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [logging, otlp]
+    
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, batch, resource]
+      exporters: [logging, otlp, prometheus]
+    
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [logging, otlp]
+

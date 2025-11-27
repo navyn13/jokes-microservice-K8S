@@ -1,0 +1,360 @@
+# Signoz OpenTelemetry Collector Deployment
+# Based on SigNoz documentation for Kubernetes deployment
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: signoz-otel-collector-config
+  namespace: platform
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      
+      # For Kubernetes metrics
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: 'otel-collector'
+              scrape_interval: 10s
+              static_configs:
+                - targets: ['0.0.0.0:8888']
+
+    processors:
+      batch:
+        send_batch_size: 1000
+        timeout: 10s
+      
+      memory_limiter:
+        check_interval: 5s
+        limit_mib: 512
+      
+      # Add resource attributes
+      resource:
+        attributes:
+          - key: cluster.name
+            value: jokes-k8s-cluster
+            action: upsert
+
+    exporters:
+      # Export to console for debugging
+      logging:
+        loglevel: debug
+      
+      # Export to SigNoz backend (using ClickHouse)
+      otlp:
+        endpoint: signoz-clickhouse:4317
+        tls:
+          insecure: true
+      
+      # Prometheus exporter for metrics
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch, resource]
+          exporters: [logging, otlp]
+        
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, batch, resource]
+          exporters: [logging, otlp, prometheus]
+        
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch, resource]
+          exporters: [logging, otlp]
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signoz-otel-collector
+  namespace: platform
+  labels:
+    app: signoz-otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signoz-otel-collector
+  template:
+    metadata:
+      labels:
+        app: signoz-otel-collector
+    spec:
+      containers:
+      - name: otel-collector
+        image: signoz/signoz-otel-collector:0.88.11
+        imagePullPolicy: IfNotPresent
+        command:
+          - /otelcontribcol
+          - --config=/conf/otel-collector-config.yaml
+        ports:
+        - name: grpc-otlp
+          containerPort: 4317
+          protocol: TCP
+        - name: http-otlp
+          containerPort: 4318
+          protocol: TCP
+        - name: metrics
+          containerPort: 8888
+          protocol: TCP
+        - name: prometheus
+          containerPort: 8889
+          protocol: TCP
+        env:
+        - name: GOGC
+          value: "80"
+        volumeMounts:
+        - name: config
+          mountPath: /conf
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+      volumes:
+      - name: config
+        configMap:
+          name: signoz-otel-collector-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signoz-otel-collector
+  namespace: platform
+  labels:
+    app: signoz-otel-collector
+spec:
+  type: ClusterIP
+  ports:
+  - name: grpc-otlp
+    port: 4317
+    targetPort: 4317
+    protocol: TCP
+  - name: http-otlp
+    port: 4318
+    targetPort: 4318
+    protocol: TCP
+  - name: metrics
+    port: 8888
+    targetPort: 8888
+    protocol: TCP
+  - name: prometheus
+    port: 8889
+    targetPort: 8889
+    protocol: TCP
+  selector:
+    app: signoz-otel-collector
+
+---
+# ClickHouse for SigNoz backend storage
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: signoz-clickhouse
+  namespace: platform
+  labels:
+    app: signoz-clickhouse
+spec:
+  serviceName: signoz-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signoz-clickhouse
+  template:
+    metadata:
+      labels:
+        app: signoz-clickhouse
+    spec:
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:23.7-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8123
+        - name: native
+          containerPort: 9000
+        - name: grpc
+          containerPort: 9009
+        env:
+        - name: CLICKHOUSE_DB
+          value: signoz
+        - name: CLICKHOUSE_USER
+          value: default
+        - name: CLICKHOUSE_PASSWORD
+          value: signoz
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signoz-clickhouse
+  namespace: platform
+  labels:
+    app: signoz-clickhouse
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8123
+    targetPort: 8123
+  - name: native
+    port: 9000
+    targetPort: 9000
+  - name: grpc
+    port: 4317
+    targetPort: 9009
+  selector:
+    app: signoz-clickhouse
+
+---
+# SigNoz Query Service (Frontend)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signoz-query-service
+  namespace: platform
+  labels:
+    app: signoz-query-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signoz-query-service
+  template:
+    metadata:
+      labels:
+        app: signoz-query-service
+    spec:
+      containers:
+      - name: query-service
+        image: signoz/query-service:0.36.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: STORAGE
+          value: clickhouse
+        - name: CLICKHOUSE_HOST
+          value: signoz-clickhouse
+        - name: CLICKHOUSE_PORT
+          value: "9000"
+        - name: CLICKHOUSE_DATABASE
+          value: signoz
+        - name: CLICKHOUSE_USER
+          value: default
+        - name: CLICKHOUSE_PASSWORD
+          value: signoz
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signoz-query-service
+  namespace: platform
+  labels:
+    app: signoz-query-service
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: signoz-query-service
+
+---
+# SigNoz Frontend (UI)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signoz-frontend
+  namespace: platform
+  labels:
+    app: signoz-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signoz-frontend
+  template:
+    metadata:
+      labels:
+        app: signoz-frontend
+    spec:
+      containers:
+      - name: frontend
+        image: signoz/frontend:0.36.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3301
+        env:
+        - name: NEXT_PUBLIC_QUERY_SERVICE_URL
+          value: http://signoz-query-service:8080
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signoz-frontend
+  namespace: platform
+  labels:
+    app: signoz-frontend
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    port: 3301
+    targetPort: 3301
+    nodePort: 30301
+  selector:
+    app: signoz-frontend
+
